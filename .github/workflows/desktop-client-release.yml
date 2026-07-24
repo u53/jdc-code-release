@@ -163,7 +163,7 @@ jobs:
           fi
           CERT_PATH="$RUNNER_TEMP/jdc-developer-id.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/jdc-build.keychain-db"
-          echo "$CSC_LINK" | base64 --decode > "$CERT_PATH"
+          printf '%s' "$CSC_LINK" | base64 -D > "$CERT_PATH"
           security create-keychain -p actions "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p actions "$KEYCHAIN_PATH"

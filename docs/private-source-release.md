@@ -57,7 +57,7 @@ GitHub 会遮蔽已登记的 Secret，但无法阻止脚本主动读取并编码
 - `APPLE_TEAM_ID`
 - `JDC_RELEASE_UPLOAD_TOKEN`
 
-`CSC_LINK` 是 Developer ID Application `.p12` 的 Base64 内容。当前只执行 codesign，不执行 notarization，因此不需要 Apple ID 或 App-Specific Password。
+`CSC_LINK` 是 Developer ID Application `.p12` 的 Base64 内容。macOS runner 使用 BSD `base64`，workflow 必须以 `base64 -D` 解码，不能使用 GNU 专属的 `base64 --decode`。当前只执行 codesign，不执行 notarization，因此不需要 Apple ID 或 App-Specific Password。
 
 GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨仓库复制原值。从旧仓库迁移时必须使用原始证书和令牌重新设置，不能把它们临时提交到代码。
 
@@ -87,4 +87,3 @@ GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨�
 - workflow 被异常修改：先禁用 Actions 或删除 Deploy Key，再审查 Git 历史和 Actions 日志；不要只删除一次 run。
 
 GitHub 对公开仓库 runner 的计费与额度政策可能变化，应以 GitHub 当前条款为准；本架构解决的是源码隔离与发布编排，不是永久计费承诺。
-
