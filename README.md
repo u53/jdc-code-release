@@ -30,3 +30,4 @@ Actions 会通过只读 Deploy Key 从私有仓库 `u53/jdc-code` 检出指定�
 
 GitHub 不允许读取或跨仓库复制已有 Secret 的原值，因此签名证书和上传令牌必须在本仓库重新设置。不要把证书、密码、私有源码 Token 或发布令牌提交到 Git。
 
+完整的安全边界、首次配置、标准发布顺序和密钥轮换方法见 [用公开 GitHub Actions 构建私有源码](docs/private-source-release.md)。
