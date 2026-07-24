@@ -61,10 +61,6 @@ GitHub 会遮蔽已登记的 Secret，但无法阻止脚本主动读取并编码
 
 GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨仓库复制原值。从旧仓库迁移时必须使用原始证书和令牌重新设置，不能把它们临时提交到代码。
 
-### 3. 配置发布 Environment
-
-部署 job 使用 `desktop-release-promote` Environment。建议在仓库设置中加入 required reviewer；否则 Environment 名称本身不构成人工审批门。
-
 不要增加接收外部代码并携带 Secrets 的 `pull_request_target` 触发器。当前 workflow 仅允许仓库管理员手动 `workflow_dispatch`，普通 push、外部 PR 和 fork 不会启动发布。
 
 ## 标准发布顺序
@@ -73,11 +69,10 @@ GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨�
 2. 等待生产 API 部署完成，确认 `https://api.jdccode.com/api/jdc/v1/health` 返回成功。
 3. 在公开仓库 Actions 页面运行 **Desktop Client Release**。
 4. 首次或排障时先用完整 commit SHA、`platform=all`、`deploy=false` 构建，只检查签名和产物。
-5. Windows 未签名安装包按服务端安全门登记绑定 SHA-256 的独立 clearance。
-6. 使用同一源码 SHA、`platform=all`、`deploy=true` 正式上传。
-7. 检查 Cloud API 的最新版本、macOS/Windows 下载接口和客户端更新。
+5. 使用同一源码 SHA、`platform=all`、`deploy=true` 正式上传。Windows 未签名包允许直接发布，仍会提交 `expectedSha256` 供服务端校验传输完整性。
+6. 检查 Cloud API 的最新版本、macOS/Windows 下载接口和客户端更新。
 
-不要直接用移动中的 `main` 作为正式发布凭据。虽然 workflow 会在运行开始时固定 SHA，运维记录和 clearance 仍应保存该 SHA、桌面版本号及构建 run URL。
+不要直接用移动中的 `main` 作为正式发布凭据。虽然 workflow 会在运行开始时固定 SHA，运维记录仍应保存该 SHA、桌面版本号及构建 run URL。
 
 ## 轮换与应急撤销
 

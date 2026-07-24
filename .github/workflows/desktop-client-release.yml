@@ -235,7 +235,6 @@ jobs:
     needs: [prepare, build]
     if: inputs.deploy == true
     runs-on: ubuntu-latest
-    environment: desktop-release-promote
     steps:
       - name: 下载全部平台产物
         uses: actions/download-artifact@v8
