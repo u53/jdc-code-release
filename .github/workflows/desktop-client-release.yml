@@ -44,7 +44,7 @@ jobs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
     steps:
       - name: 检出私有源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ inputs.source_ref }}
@@ -112,7 +112,7 @@ jobs:
 
       - name: 检出已固定的私有源码
         if: steps.filter.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ needs.prepare.outputs.source_sha }}
@@ -122,13 +122,13 @@ jobs:
 
       - name: 安装 pnpm
         if: steps.filter.outputs.run == 'true'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.12.0
 
       - name: 安装 Node.js
         if: steps.filter.outputs.run == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: pnpm
@@ -223,7 +223,7 @@ jobs:
 
       - name: 上传短期构建 Artifact
         if: steps.filter.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jdc-desktop-${{ matrix.platform }}-${{ needs.prepare.outputs.version }}
           path: ${{ runner.temp }}/jdc-release-${{ matrix.platform }}/*
@@ -238,7 +238,7 @@ jobs:
     environment: desktop-release-promote
     steps:
       - name: 下载全部平台产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: jdc-desktop-*-${{ needs.prepare.outputs.version }}
           path: artifacts
