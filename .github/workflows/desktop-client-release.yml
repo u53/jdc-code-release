@@ -1,0 +1,330 @@
+name: Desktop Client Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 私有 jdc-code 的分支、标签或完整 commit SHA
+        required: true
+        default: main
+        type: string
+      deploy:
+        description: 构建成功后上传到生产 Cloud API
+        required: false
+        default: false
+        type: boolean
+      platform:
+        description: 构建平台
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - mac
+          - win
+
+concurrency:
+  group: desktop-client-release-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPOSITORY: u53/jdc-code
+  CLOUD_API_URL: ${{ vars.JDC_CLOUD_API_URL }}
+
+jobs:
+  prepare:
+    name: Resolve private source
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+      version: ${{ steps.meta.outputs.version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+    steps:
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.JDC_SOURCE_REPO_SSH_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: 固定源码与版本
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git -C source rev-parse HEAD)"
+          VERSION="$(node -p "require('./source/apps/desktop-client/package.json').version")"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::客户端版本格式无效：${VERSION}"
+            exit 1
+          fi
+          if [ "${{ inputs.deploy }}" = "true" ] && [ "${{ inputs.platform }}" != "all" ]; then
+            echo "::error::部署发布必须选择 platform=all；单平台仅生成 Artifact"
+            exit 1
+          fi
+          if [ -z "${CLOUD_API_URL:-}" ]; then
+            echo "::error::缺少仓库变量 JDC_CLOUD_API_URL"
+            exit 1
+          fi
+          case "$CLOUD_API_URL" in
+            https://api.jdccode.com|https://api.jdccode.com/ ) ;;
+            *)
+              echo "::error::拒绝非生产上传目标：${CLOUD_API_URL}"
+              exit 1
+              ;;
+          esac
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "version=$VERSION"
+            echo "release_tag=desktop-v${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved ${SOURCE_REPOSITORY}@${SOURCE_SHA} (desktop-v${VERSION})"
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            dist_script: dist:mac
+          - os: windows-latest
+            platform: win
+            dist_script: dist:win
+    steps:
+      - name: 按输入过滤平台
+        id: filter
+        shell: bash
+        run: |
+          if [ "${{ inputs.platform }}" = "all" ] || [ "${{ inputs.platform }}" = "${{ matrix.platform }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 检出已固定的私有源码
+        if: steps.filter.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          ssh-key: ${{ secrets.JDC_SOURCE_REPO_SSH_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: 安装 pnpm
+        if: steps.filter.outputs.run == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: 安装 Node.js
+        if: steps.filter.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: 安装依赖
+        if: steps.filter.outputs.run == 'true'
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: 编译 workspace 依赖
+        if: steps.filter.outputs.run == 'true'
+        working-directory: source/apps/desktop-client
+        run: pnpm build:deps
+
+      - name: 重建原生模块
+        if: steps.filter.outputs.run == 'true'
+        working-directory: source/apps/desktop-client
+        run: pnpm rebuild:native
+
+      - name: 导入 Mac Developer ID 证书
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CSC_LINK:-}" ] || [ -z "${CSC_KEY_PASSWORD:-}" ]; then
+            echo "::error::缺少 CSC_LINK 或 CSC_KEY_PASSWORD，无法签名 macOS 安装包"
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/jdc-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/jdc-build.keychain-db"
+          echo "$CSC_LINK" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p actions "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p actions "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN_PATH"
+          rm "$CERT_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: 打包 Electron
+        if: steps.filter.outputs.run == 'true'
+        working-directory: source/apps/desktop-client
+        env:
+          VITE_JDC_CLOUD_API: ${{ env.CLOUD_API_URL }}
+          JDC_CLOUD_API: ${{ env.CLOUD_API_URL }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'mac' && 'true' || 'false' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: pnpm ${{ matrix.dist_script }}
+
+      - name: 校验 macOS 签名
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac'
+        shell: bash
+        working-directory: source/apps/desktop-client
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(release/mac*/JDC\ Code.app release/mac*/JDCCode.app)
+          if [ "${#apps[@]}" -eq 0 ]; then
+            echo "::error::未找到已打包的 macOS .app"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier='
+
+      - name: 收集发布文件
+        if: steps.filter.outputs.run == 'true'
+        shell: bash
+        working-directory: source/apps/desktop-client
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jdc-release-${{ matrix.platform }}"
+          shopt -s nullglob
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            installers=(release/*.dmg)
+            files=(release/*.dmg release/*.dmg.blockmap release/*-mac.zip release/*-mac.zip.blockmap release/latest-mac.yml)
+          else
+            installers=(release/*Setup*.exe)
+            files=(release/*Setup*.exe release/*Setup*.exe.blockmap release/latest.yml)
+          fi
+          if [ "${#installers[@]}" -eq 0 ] || [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::未找到 ${{ matrix.platform }} 的安装包和更新元数据"
+            exit 1
+          fi
+          cp "${files[@]}" "$RUNNER_TEMP/jdc-release-${{ matrix.platform }}/"
+
+      - name: 上传短期构建 Artifact
+        if: steps.filter.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jdc-desktop-${{ matrix.platform }}-${{ needs.prepare.outputs.version }}
+          path: ${{ runner.temp }}/jdc-release-${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Deploy to JDC Cloud API
+    needs: [prepare, build]
+    if: inputs.deploy == true
+    runs-on: ubuntu-latest
+    environment: desktop-release-promote
+    steps:
+      - name: 下载全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: jdc-desktop-*-${{ needs.prepare.outputs.version }}
+          path: artifacts
+          merge-multiple: true
+
+      - name: 上传并验证发布
+        shell: bash
+        env:
+          API_URL: ${{ env.CLOUD_API_URL }}
+          UPLOAD_TOKEN: ${{ secrets.JDC_RELEASE_UPLOAD_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_ID: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPLOAD_TOKEN:-}" ]; then
+            echo "::error::缺少 JDC_RELEASE_UPLOAD_TOKEN"
+            exit 1
+          fi
+          shopt -s nullglob
+          files=(artifacts/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::没有可上传的构建产物"
+            exit 1
+          fi
+          uploaded=0
+          mac_installers=0
+          win_installers=0
+          for file in "${files[@]}"; do
+            [ -f "$file" ] || continue
+            name="$(basename "$file")"
+            case "$name" in
+              *.dmg|*.zip|*.exe|*.msi|*.yml|*.yaml|*.blockmap) ;;
+              *) continue ;;
+            esac
+            metadata=()
+            platform=""
+            case "$name" in
+              *.dmg|*-mac.zip)
+                platform=mac
+                metadata+=(-F platform=mac)
+                ;;
+              *.exe|*.msi)
+                platform=win
+                metadata+=(-F platform=win)
+                ;;
+            esac
+            case "$name" in
+              *arm64*|*aarch64*) metadata+=(-F arch=arm64) ;;
+              *universal*) metadata+=(-F arch=universal) ;;
+              *.dmg|*.zip|*.exe|*.msi) metadata+=(-F arch=x64) ;;
+            esac
+            case "$name" in
+              *.exe|*.msi)
+                sha="$(sha256sum "$file" | awk '{print $1}')"
+                metadata+=(-F "expectedSha256=${sha}" -F "buildId=${BUILD_ID}")
+                ;;
+            esac
+            echo "Uploading ${name} to ${API_URL}"
+            curl --fail-with-body --silent --show-error -X POST "${API_URL%/}/api/jdc/v1/releases/upload" \
+              -H "Authorization: Bearer ${UPLOAD_TOKEN}" \
+              -F "file=@${file}" \
+              -F "version=${VERSION}" \
+              -F "signatureStatus=unsigned" \
+              "${metadata[@]}"
+            uploaded=$((uploaded + 1))
+            if [ "$platform" = mac ]; then mac_installers=$((mac_installers + 1)); fi
+            if [ "$platform" = win ]; then win_installers=$((win_installers + 1)); fi
+          done
+          if [ "$uploaded" -eq 0 ] || [ "$mac_installers" -eq 0 ] || [ "$win_installers" -eq 0 ]; then
+            echo "::error::完整发布必须包含 macOS 和 Windows 安装包"
+            exit 1
+          fi
+          latest_json="$(curl --fail-with-body --silent --show-error "${API_URL%/}/api/jdc/v1/releases/latest")"
+          LATEST_JSON="$latest_json" EXPECTED_VERSION="$VERSION" node <<'NODE'
+          const latest = JSON.parse(process.env.LATEST_JSON ?? '{}');
+          if (latest.latestVersion !== process.env.EXPECTED_VERSION) {
+            throw new Error(`发布版本不一致：expected=${process.env.EXPECTED_VERSION} actual=${latest.latestVersion ?? ''}`);
+          }
+          const assets = Array.isArray(latest.assets) ? latest.assets : [];
+          if (!assets.some((asset) => asset.platform === 'mac' && String(asset.fileName).endsWith('.dmg'))) {
+            throw new Error('发布清单缺少 macOS DMG');
+          }
+          if (!assets.some((asset) => asset.platform === 'win' && String(asset.fileName).endsWith('.exe'))) {
+            throw new Error('发布清单缺少 Windows EXE');
+          }
+          NODE
+          curl -fsSIL "${API_URL%/}/api/jdc/v1/releases/download?platform=mac&arch=arm64" >/dev/null
+          curl -fsSIL "${API_URL%/}/api/jdc/v1/releases/download?platform=win&arch=x64" >/dev/null
+          echo "Published ${VERSION} from ${{ needs.prepare.outputs.source_sha }}"
