@@ -133,22 +133,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $nativeTests = @(
             '冷启动探针通过',
-            'harden 后来源文件对受限子进程不可读，工作区可读可写',
-            'Job Object 终止后进程退出',
-            'spawnSync 短命令可用',
-            '静默子进程 spawnSync 超时可返回（PeekNamedPipe 非阻塞）',
-            '静默异步子进程期间主线程定时器仍可触发',
-            'harden 不存在路径抛 TargetMissing 且不卸载',
-            '二次启动：探针根随机重建，旧版 userData deny-all 不影响安装',
-            'grant-workspace 项目根可写，同时 .jdc/sources 仍不可读',
-            'private 目录 deny-all：受限子进程读不到本地库文件',
-            'OWNER RIGHTS：受限进程 icacls(*SID) 改 ACL 失败，且仍读不到密钥',
-            'revoke-workspace：整份恢复原 ACL，撤销后受限进程不再能写',
-            '受限子进程无法 OpenProcess(PROCESS_VM_READ) 主进程',
-            '未授权的用户目录（Documents）对受限子进程不可列举',
-            'cmd round-trip：含 & 的参数原样传达且不被解释为命令分隔符',
-            '.jdc deny-rename：rules 可读；sources deny-all 不可读',
-            'ConPTY spawn 可启动并 Job 终止'
+            'harden 后来源文件',
+            'Job Object',
+            'spawnSync 短命令',
+            '静默子进程 spawnSync',
+            '静默异步子进程',
+            'harden 不存在路径',
+            '二次启动',
+            'grant-workspace 项目根',
+            'private 目录 deny-all',
+            'OWNER RIGHTS',
+            'revoke-workspace',
+            '受限子进程无法 OpenProcess',
+            '未授权的用户目录',
+            'cmd round-trip',
+            'rules 可读',
+            'ConPTY spawn'
           )
           foreach ($testName in $nativeTests) {
             pnpm exec vitest run tests/windows-broker-isolation.test.ts -t $testName --pool=forks --maxWorkers=1 --no-file-parallelism --reporter=verbose
