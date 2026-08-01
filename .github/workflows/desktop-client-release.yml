@@ -124,9 +124,15 @@ jobs:
           pnpm --filter @jdc/local-runtime exec tsc -p tsconfig.json --noEmit
           pnpm --filter @jdc/desktop-client exec tsc -p tsconfig.json --noEmit
 
-      - name: 运行 Windows 隔离矩阵
+      - name: 运行原生 Windows Broker 矩阵
+        env:
+          JDC_WINDOWS_BROKER_DIAGNOSTICS: '1'
         working-directory: source
-        run: pnpm exec vitest run tests/windows-broker-isolation.test.ts tests/source-isolation-boundary.test.ts tests/source-handle-lock.test.ts tests/search-ripgrep-backend.test.ts tests/local-db-migration.test.ts tests/restricted-env-allowlist.test.ts tests/workspace-acl-backup.test.ts
+        run: pnpm exec vitest run tests/windows-broker-isolation.test.ts --pool=forks --maxWorkers=1 --no-file-parallelism --reporter=verbose
+
+      - name: 运行 Windows 隔离支持矩阵
+        working-directory: source
+        run: pnpm exec vitest run tests/source-isolation-boundary.test.ts tests/source-handle-lock.test.ts tests/search-ripgrep-backend.test.ts tests/local-db-migration.test.ts tests/restricted-env-allowlist.test.ts tests/workspace-acl-backup.test.ts
 
       - name: 构建桌面端
         working-directory: source
