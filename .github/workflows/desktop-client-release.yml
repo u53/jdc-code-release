@@ -85,9 +85,64 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Resolved ${SOURCE_REPOSITORY}@${SOURCE_SHA} (desktop-v${VERSION})"
 
+  windows-isolation:
+    name: Windows Broker Isolation Gate
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出已固定的私有源码
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          ssh-key: ${{ secrets.JDC_SOURCE_REPO_SSH_KEY }}
+          persist-credentials: false
+          path: source
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: 安装依赖
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: 编译 workspace 依赖
+        working-directory: source
+        run: pnpm --filter @jdc/desktop-client build:deps
+
+      - name: Typecheck
+        working-directory: source
+        run: |
+          pnpm --filter @jdc/local-runtime exec tsc -p tsconfig.json --noEmit
+          pnpm --filter @jdc/desktop-client exec tsc -p tsconfig.json --noEmit
+
+      - name: 运行 Windows 隔离矩阵
+        working-directory: source
+        run: pnpm exec vitest run tests/windows-broker-isolation.test.ts tests/source-isolation-boundary.test.ts tests/source-handle-lock.test.ts tests/search-ripgrep-backend.test.ts tests/local-db-migration.test.ts tests/restricted-env-allowlist.test.ts tests/workspace-acl-backup.test.ts
+
+      - name: 构建桌面端
+        working-directory: source
+        run: pnpm --filter @jdc/desktop-client build
+
+      - name: 生成 Windows unpacked 包
+        working-directory: source
+        run: pnpm --filter @jdc/desktop-client exec electron-builder --win dir --publish never
+
+      - name: 执行打包 Broker 冒烟测试
+        working-directory: source
+        run: node scripts/windows-packaged-broker-smoke.mjs
+
   build:
     name: Build (${{ matrix.platform }})
-    needs: prepare
+    needs: [prepare, windows-isolation]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
