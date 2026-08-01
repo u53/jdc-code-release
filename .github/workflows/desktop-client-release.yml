@@ -136,6 +136,7 @@ jobs:
             'harden 后来源文件',
             'Job Object',
             'spawnSync 短命令',
+            '非 System32 的宿主 Node 工具',
             '静默子进程 spawnSync',
             '静默异步子进程',
             'harden 不存在路径',
