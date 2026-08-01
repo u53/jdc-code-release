@@ -163,6 +163,10 @@ jobs:
         working-directory: source
         run: pnpm --filter @jdc/desktop-client build
 
+      - name: 为 Electron ABI 重建原生模块
+        working-directory: source
+        run: pnpm --filter @jdc/desktop-client rebuild:native
+
       - name: 生成 Windows unpacked 包
         working-directory: source
         run: pnpm --filter @jdc/desktop-client exec electron-builder --win dir --publish never
