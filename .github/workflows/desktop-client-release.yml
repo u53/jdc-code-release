@@ -32,7 +32,8 @@ permissions:
 
 env:
   SOURCE_REPOSITORY: u53/jdc-code
-  CLOUD_API_URL: ${{ vars.JDC_CLOUD_API_URL }}
+  RELEASE_API_URL: ${{ vars.JDC_CLOUD_API_URL }}
+  CLIENT_CLOUD_API_URL: https://admin.jdccode.com
 
 jobs:
   prepare:
@@ -67,14 +68,14 @@ jobs:
             echo "::error::部署发布必须选择 platform=all；单平台仅生成 Artifact"
             exit 1
           fi
-          if [ -z "${CLOUD_API_URL:-}" ]; then
+          if [ -z "${RELEASE_API_URL:-}" ]; then
             echo "::error::缺少仓库变量 JDC_CLOUD_API_URL"
             exit 1
           fi
-          case "$CLOUD_API_URL" in
+          case "$RELEASE_API_URL" in
             https://api.jdccode.com|https://api.jdccode.com/ ) ;;
             *)
-              echo "::error::拒绝非生产上传目标：${CLOUD_API_URL}"
+              echo "::error::拒绝非生产上传目标：${RELEASE_API_URL}"
               exit 1
               ;;
           esac
@@ -178,12 +179,16 @@ jobs:
         if: steps.filter.outputs.run == 'true'
         working-directory: source/apps/desktop-client
         env:
-          VITE_JDC_CLOUD_API: ${{ env.CLOUD_API_URL }}
-          JDC_CLOUD_API: ${{ env.CLOUD_API_URL }}
+          VITE_JDC_CLOUD_API: ${{ env.CLIENT_CLOUD_API_URL }}
+          JDC_CLOUD_API: ${{ env.CLIENT_CLOUD_API_URL }}
+          VITE_JDC_EXTENSION_MARKETPLACE: '1'
+          VITE_JDC_WEBSITE_BASE_URL: https://jdccode.com
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'mac' && 'true' || 'false' }}
           APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm ${{ matrix.dist_script }}
+        run: |
+          node -e "if (process.env.VITE_JDC_EXTENSION_MARKETPLACE !== '1') throw new Error('正式构建必须启用 Marketplace')"
+          pnpm ${{ matrix.dist_script }}
 
       - name: 校验 macOS 签名
         if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac'
@@ -246,7 +251,7 @@ jobs:
       - name: 上传并验证发布
         shell: bash
         env:
-          API_URL: ${{ env.CLOUD_API_URL }}
+          API_URL: ${{ env.RELEASE_API_URL }}
           UPLOAD_TOKEN: ${{ secrets.JDC_RELEASE_UPLOAD_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_ID: ${{ needs.prepare.outputs.release_tag }}

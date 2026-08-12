@@ -14,6 +14,8 @@ Actions 会通过只读 Deploy Key 从私有仓库 `u53/jdc-code` 检出指定�
 
 工作流会先把 `source_ref` 固定为不可变的 commit SHA，两个平台构建同一份源码，避免构建期间分支移动。
 
+正式桌面包显式传入 `VITE_JDC_EXTENSION_MARKETPLACE=1`，保证 Customize 中的 Marketplace、已安装、来源与插件新增入口不会被生产构建裁掉。客户端 Cloud 地址固定为 `https://admin.jdccode.com`，发布产物上传仍使用仓库变量 `JDC_CLOUD_API_URL` 指向的 `https://api.jdccode.com`。紧急关闭必须回到私有源码的正式发布决策，不得在这个公开工作流中临时遗漏变量。
+
 ## Actions 配置
 
 仓库变量：

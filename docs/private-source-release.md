@@ -72,6 +72,8 @@ GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨�
 5. 使用同一源码 SHA、`platform=all`、`deploy=true` 正式上传。Windows 未签名包允许直接发布，仍会提交 `expectedSha256` 供服务端校验传输完整性。
 6. 检查 Cloud API 的最新版本、macOS/Windows 下载接口和客户端更新。
 
+构建 job 必须在执行 `pnpm dist:*` 时显式传入 `VITE_JDC_EXTENSION_MARKETPLACE=1`。该值是 Vite 编译期配置，不能通过 Cloud API 环境变量在已打包客户端中事后开启。客户端构建使用 `https://admin.jdccode.com`，发布上传则继续使用仓库变量 `JDC_CLOUD_API_URL=https://api.jdccode.com`，两者不得复用。
+
 不要直接用移动中的 `main` 作为正式发布凭据。虽然 workflow 会在运行开始时固定 SHA，运维记录仍应保存该 SHA、桌面版本号及构建 run URL。
 
 ## 轮换与应急撤销
