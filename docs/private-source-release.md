@@ -9,7 +9,8 @@ flowchart LR
   A["公开发布仓库<br/>workflow"] -->|"Actions Secret 中的只读 Deploy Key"| B["私有源码仓库<br/>固定 commit SHA"]
   B --> C["临时 macOS / Windows runner"]
   C --> D["1 天 Actions Artifact"]
-  D -->|"deploy=true + 上传令牌"| E["api.jdccode.com<br/>发布接口"]
+  D -->|"deploy=true + 上传令牌"| E["api.jdccode.com<br/>隔离候选"]
+  E -->|"管理端预览并手动发布"| F["客户端更新 Feed"]
 ```
 
 ## 哪些内容会公开
@@ -69,8 +70,9 @@ GitHub Secret 是单向写入的，API 只能列出名称，不能读取或跨�
 2. 等待生产 API 部署完成，确认 `https://api.jdccode.com/api/jdc/v1/health` 返回成功。
 3. 在公开仓库 Actions 页面运行 **Desktop Client Release**。
 4. 首次或排障时先用完整 commit SHA、`platform=all`、`deploy=false` 构建，只检查签名和产物。
-5. 使用同一源码 SHA、`platform=all`、`deploy=true` 正式上传。Windows 未签名包允许直接发布，仍会提交 `expectedSha256` 供服务端校验传输完整性。
-6. 检查 Cloud API 的最新版本、macOS/Windows 下载接口和客户端更新。
+5. 使用同一源码 SHA、`platform=all`、`deploy=true` 上传隔离候选。候选完成后不会改变客户端当前版本；Windows 未签名包仍会提交实际 SHA-256 供服务端校验传输完整性。
+6. 在 JDC 管理端进入“客户端发布”，编辑 Markdown 或安全 HTML 发布说明，完成暗色/亮色与桌面/窄窗口四种同构预览，再手动发布。
+7. 发布成功后检查 Cloud API 最新版本、GitHub Release、macOS/Windows 下载接口和客户端更新。
 
 构建 job 必须在执行 `pnpm dist:*` 时显式传入 `VITE_JDC_EXTENSION_MARKETPLACE=1`。该值是 Vite 编译期配置，不能通过 Cloud API 环境变量在已打包客户端中事后开启。客户端构建使用 `https://admin.jdccode.com`，发布上传则继续使用仓库变量 `JDC_CLOUD_API_URL=https://api.jdccode.com`，两者不得复用。
 

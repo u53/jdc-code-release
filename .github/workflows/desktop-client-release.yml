@@ -236,7 +236,7 @@ jobs:
           retention-days: 1
 
   deploy:
-    name: Deploy to JDC Cloud API
+    name: Upload candidate to JDC Cloud API
     needs: [prepare, build]
     if: inputs.deploy == true
     runs-on: ubuntu-latest
@@ -248,17 +248,33 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: 上传并验证发布
+      - name: 检出已固定的发布说明
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          ssh-key: ${{ secrets.JDC_SOURCE_REPO_SSH_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: 上传并完成 Cloud API 候选版本
         shell: bash
         env:
           API_URL: ${{ env.RELEASE_API_URL }}
           UPLOAD_TOKEN: ${{ secrets.JDC_RELEASE_UPLOAD_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_ID: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [ -z "${UPLOAD_TOKEN:-}" ]; then
             echo "::error::缺少 JDC_RELEASE_UPLOAD_TOKEN"
+            exit 1
+          fi
+          if [ "${REQUESTED_PLATFORM:-all}" != "all" ]; then
+            echo "::error::候选发布必须选择 platform=all；单平台模式仅用于构建 Artifact"
             exit 1
           fi
           shopt -s nullglob
@@ -267,68 +283,123 @@ jobs:
             echo "::error::没有可上传的构建产物"
             exit 1
           fi
-          uploaded=0
-          mac_installers=0
-          win_installers=0
-          for file in "${files[@]}"; do
-            [ -f "$file" ] || continue
-            name="$(basename "$file")"
-            case "$name" in
-              *.dmg|*.zip|*.exe|*.msi|*.yml|*.yaml|*.blockmap) ;;
-              *) continue ;;
-            esac
-            metadata=()
-            platform=""
-            case "$name" in
-              *.dmg|*-mac.zip)
-                platform=mac
-                metadata+=(-F platform=mac)
-                ;;
-              *.exe|*.msi)
-                platform=win
-                metadata+=(-F platform=win)
-                ;;
-            esac
-            case "$name" in
-              *arm64*|*aarch64*) metadata+=(-F arch=arm64) ;;
-              *universal*) metadata+=(-F arch=universal) ;;
-              *.dmg|*.zip|*.exe|*.msi) metadata+=(-F arch=x64) ;;
-            esac
-            case "$name" in
-              *.exe|*.msi)
-                sha="$(sha256sum "$file" | awk '{print $1}')"
-                metadata+=(-F "expectedSha256=${sha}" -F "buildId=${BUILD_ID}")
-                ;;
-            esac
-            echo "Uploading ${name} to ${API_URL}"
-            curl --fail-with-body --silent --show-error -X POST "${API_URL%/}/api/jdc/v1/releases/upload" \
-              -H "Authorization: Bearer ${UPLOAD_TOKEN}" \
-              -F "file=@${file}" \
-              -F "version=${VERSION}" \
-              -F "signatureStatus=unsigned" \
-              "${metadata[@]}"
-            uploaded=$((uploaded + 1))
-            if [ "$platform" = mac ]; then mac_installers=$((mac_installers + 1)); fi
-            if [ "$platform" = win ]; then win_installers=$((win_installers + 1)); fi
-          done
-          if [ "$uploaded" -eq 0 ] || [ "$mac_installers" -eq 0 ] || [ "$win_installers" -eq 0 ]; then
-            echo "::error::完整发布必须包含 macOS 和 Windows 安装包"
+          version_file=""
+          if [ -f artifacts/latest.yml ]; then
+            version_file="artifacts/latest.yml"
+          elif [ -f artifacts/latest-mac.yml ]; then
+            version_file="artifacts/latest-mac.yml"
+          fi
+          if [ -z "$version_file" ]; then
+            echo "::error::未找到 latest.yml 或 latest-mac.yml，无法确认候选版本"
             exit 1
           fi
-          latest_json="$(curl --fail-with-body --silent --show-error "${API_URL%/}/api/jdc/v1/releases/latest")"
-          LATEST_JSON="$latest_json" EXPECTED_VERSION="$VERSION" node <<'NODE'
-          const latest = JSON.parse(process.env.LATEST_JSON ?? '{}');
-          if (latest.latestVersion !== process.env.EXPECTED_VERSION) {
-            throw new Error(`发布版本不一致：expected=${process.env.EXPECTED_VERSION} actual=${latest.latestVersion ?? ''}`);
-          }
-          const assets = Array.isArray(latest.assets) ? latest.assets : [];
-          if (!assets.some((asset) => asset.platform === 'mac' && String(asset.fileName).endsWith('.dmg'))) {
-            throw new Error('发布清单缺少 macOS DMG');
-          }
-          if (!assets.some((asset) => asset.platform === 'win' && String(asset.fileName).endsWith('.exe'))) {
-            throw new Error('发布清单缺少 Windows EXE');
+          ARTIFACT_VERSION="$(sed -nE "s/^version:[[:space:]]*['\"]?([^'\"]+)['\"]?[[:space:]]*$/\1/p" "$version_file" | head -n 1)"
+          if [ -z "$ARTIFACT_VERSION" ] || [ "$ARTIFACT_VERSION" != "$VERSION" ]; then
+            echo "::error::安装包版本 ${ARTIFACT_VERSION:-missing} 与源码版本 ${VERSION} 不一致"
+            exit 1
+          fi
+          NOTES_DOCUMENT_PATH="docs/releases/${VERSION}.md"
+          NOTES_FILE="source/${NOTES_DOCUMENT_PATH}"
+          node source/scripts/validate-desktop-release-notes.mjs "$NOTES_FILE" "$VERSION"
+          PUBLIC_BEFORE="$(curl -sfS "${API_URL%/}/api/jdc/v1/releases/latest")"
+          NOTES_FILE="$NOTES_FILE" NOTES_DOCUMENT_PATH="$NOTES_DOCUMENT_PATH" RUN_ID="$GITHUB_RUN_ID" RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT_VALUE" node <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readdirSync, readFileSync, statSync, writeFileSync } = require('node:fs');
+          const { basename, join } = require('node:path');
+          const files = readdirSync('artifacts').map((name) => join('artifacts', name)).filter((path) => statSync(path).isFile());
+          const artifacts = files.flatMap((path) => {
+            const fileName = basename(path);
+            if (fileName === 'builder-debug.yml' || fileName === 'builder-effective-config.yaml') return [];
+            let platform;
+            let kind;
+            if (/^latest-mac\.ya?ml$/i.test(fileName)) { platform = 'mac'; kind = 'metadata'; }
+            else if (/^latest\.ya?ml$/i.test(fileName)) { platform = 'win'; kind = 'metadata'; }
+            else if (/\.dmg$/i.test(fileName)) { platform = 'mac'; kind = 'installer'; }
+            else if (/-mac\.zip$/i.test(fileName)) { platform = 'mac'; kind = 'updater_archive'; }
+            else if (/\.(?:exe|msi)$/i.test(fileName)) { platform = 'win'; kind = 'installer'; }
+            else if (/\.blockmap$/i.test(fileName)) { platform = /(?:dmg|-mac\.zip)/i.test(fileName) ? 'mac' : 'win'; kind = 'blockmap'; }
+            else return [];
+            const arch = /(?:arm64|aarch64)/i.test(fileName) ? 'arm64' : /universal/i.test(fileName) ? 'universal' : 'x64';
+            const bytes = readFileSync(path);
+            return [{
+              fileName,
+              kind,
+              platform,
+              arch,
+              sizeBytes: bytes.length,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+            }];
+          }).sort((a, b) => a.fileName.localeCompare(b.fileName));
+          const request = {
+            schemaVersion: 'jdc.client-release-candidate-create.v1',
+            version: process.env.VERSION,
+            sourceCommitSha: process.env.SOURCE_SHA,
+            sourceRef: process.env.SOURCE_SHA,
+            buildId: process.env.BUILD_ID,
+            githubRunId: process.env.RUN_ID,
+            githubRunAttempt: Number(process.env.RUN_ATTEMPT),
+            requiredPlatforms: ['mac', 'win'],
+            expectedArtifacts: artifacts,
+            releaseNotes: {
+              format: 'markdown',
+              content: readFileSync(process.env.NOTES_FILE, 'utf8'),
+              sourceDocumentPath: process.env.NOTES_DOCUMENT_PATH,
+            },
+          };
+          writeFileSync('candidate-request.json', JSON.stringify(request));
+          NODE
+          CREATE_RESPONSE="$(curl --fail-with-body --silent --show-error -X POST "${API_URL%/}/api/jdc/v1/releases/candidates" \
+            -H "Authorization: Bearer ${UPLOAD_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @candidate-request.json)"
+          CANDIDATE_ID="$(CREATE_RESPONSE="$CREATE_RESPONSE" node -e "const v=JSON.parse(process.env.CREATE_RESPONSE); if(typeof v.candidateId!=='string') throw new Error('candidateId missing'); process.stdout.write(v.candidateId)")"
+          EXPECTED_COUNT="$(node -e "process.stdout.write(String(JSON.parse(require('node:fs').readFileSync('candidate-request.json')).expectedArtifacts.length))")"
+          uploaded=0
+          while IFS= read -r file; do
+            [ -f "$file" ] || continue
+            name="$(basename "$file")"
+            expected="$(FILE_NAME="$name" node -e "const q=JSON.parse(require('node:fs').readFileSync('candidate-request.json')); const a=q.expectedArtifacts.find(x=>x.fileName===process.env.FILE_NAME); if(a) process.stdout.write(JSON.stringify(a))")"
+            [ -n "$expected" ] || continue
+            encoded="$(FILE_NAME="$name" node -e "process.stdout.write(encodeURIComponent(process.env.FILE_NAME))")"
+            size="$(EXPECTED="$expected" node -e "process.stdout.write(String(JSON.parse(process.env.EXPECTED).sizeBytes))")"
+            sha="$(EXPECTED="$expected" node -e "process.stdout.write(JSON.parse(process.env.EXPECTED).sha256)")"
+            echo "Uploading candidate artifact ${name} sha256=${sha:0:12}"
+            curl --fail-with-body --silent --show-error -X PUT "${API_URL%/}/api/jdc/v1/releases/candidates/${CANDIDATE_ID}/files/${encoded}" \
+              -H "Authorization: Bearer ${UPLOAD_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "Content-Length: ${size}" \
+              -H "X-JDC-Signature-Status: unsigned" \
+              --data-binary "@${file}"
+            uploaded=$((uploaded + 1))
+          done < <(find artifacts -maxdepth 1 -type f -print | sort)
+          if [ "$uploaded" -ne "$EXPECTED_COUNT" ]; then
+            echo "::error::候选上传数量错误：expected=${EXPECTED_COUNT} actual=${uploaded}"
+            exit 1
+          fi
+          FINALIZE_RESPONSE="$(curl --fail-with-body --silent --show-error -X POST "${API_URL%/}/api/jdc/v1/releases/candidates/${CANDIDATE_ID}/finalize" \
+            -H "Authorization: Bearer ${UPLOAD_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "$(node -e "process.stdout.write(JSON.stringify({schemaVersion:'jdc.client-release-candidate-finalize.v1',sourceCommitSha:process.env.SOURCE_SHA,buildId:process.env.BUILD_ID}))")")"
+          FINALIZE_RESPONSE="$FINALIZE_RESPONSE" EXPECTED_VERSION="$VERSION" node <<'NODE'
+          const value = JSON.parse(process.env.FINALIZE_RESPONSE);
+          if (value.state !== 'ready' || value.public !== false || value.version !== process.env.EXPECTED_VERSION) {
+            throw new Error(`候选 finalize 响应非法：${JSON.stringify(value)}`);
           }
           NODE
-          curl -fsSIL "${API_URL%/}/api/jdc/v1/releases/download?platform=mac&arch=arm64" >/dev/null
-          curl -fsSIL "${API_URL%/}/api/jdc/v1/releases/download?platform=win&arch=x64" >/dev/null
-          echo "Published ${VERSION} from ${{ needs.prepare.outputs.source_sha }}"
+          PUBLIC_AFTER="$(curl -sfS "${API_URL%/}/api/jdc/v1/releases/latest")"
+          PUBLIC_BEFORE="$PUBLIC_BEFORE" PUBLIC_AFTER="$PUBLIC_AFTER" node <<'NODE'
+          const before = JSON.parse(process.env.PUBLIC_BEFORE);
+          const after = JSON.parse(process.env.PUBLIC_AFTER);
+          if (before.latestVersion !== after.latestVersion) {
+            throw new Error(`候选上传提前改变了 public latest：before=${before.latestVersion} after=${after.latestVersion}`);
+          }
+          NODE
+          {
+            echo "## Candidate ready for manual review"
+            echo ""
+            echo "- Candidate: \`${CANDIDATE_ID}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Artifacts: ${uploaded}"
+            echo "- Public latest unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate ready: ${CANDIDATE_ID}; no public release was performed."
