@@ -115,9 +115,8 @@ jobs:
         if: steps.filter.outputs.run == 'true' && matrix.platform == 'win'
         shell: pwsh
         run: |
-          # LongPathsEnabled 对 MSBuild 的 WriteLinesToFile 无效（它走
-          # LegacyNormalizePath），路径长度靠下面的 hoisted 布局解决；这里只保证
-          # git 检出阶段不出问题。
+          # 注意：LongPathsEnabled 对 MSBuild 的 WriteLinesToFile 无效（它走
+          # LegacyNormalizePath），所以原生模块重建另用 subst 缩短路径。
           New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
             -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force | Out-Null
           git config --system core.longpaths true
@@ -146,19 +145,10 @@ jobs:
           cache: pnpm
           cache-dependency-path: source/pnpm-lock.yaml
 
-      - name: 安装依赖（macOS）
-        if: steps.filter.outputs.run == 'true' && matrix.platform != 'win'
+      - name: 安装依赖
+        if: steps.filter.outputs.run == 'true'
         working-directory: source
         run: pnpm install --frozen-lockfile
-
-      # Windows 上 pnpm 默认的 .pnpm 哈希目录会把 node-pty 的 .vcxproj 路径撑过 260
-      # 字符（node-pty@1.1.0_patch_hash=.../node-addon-api@7.1.1/node_modules/...），
-      # 而 MSBuild 的 WriteLinesToFile 走 LegacyNormalizePath，不认 LongPathsEnabled，
-      # subst 也会被 realpathSync 还原。改成 hoisted 链接布局，直接消除哈希目录层级。
-      - name: 安装依赖（Windows，hoisted 布局）
-        if: steps.filter.outputs.run == 'true' && matrix.platform == 'win'
-        working-directory: source
-        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
 
       - name: 编译 workspace 依赖
         if: steps.filter.outputs.run == 'true'
@@ -166,9 +156,33 @@ jobs:
         run: pnpm build:deps
 
       - name: 重建原生模块
-        if: steps.filter.outputs.run == 'true'
+        if: steps.filter.outputs.run == 'true' && matrix.platform != 'win'
         working-directory: source/apps/desktop-client
         run: pnpm rebuild:native
+
+      # Windows 上 MSBuild 的 WriteLinesToFile 走 LegacyNormalizePath，不认
+      # LongPathsEnabled；node-pty 经 .pnpm 哈希目录后拼接的 .vcxproj 路径超过
+      # 260 字符。用 subst 把工作区挂到一个盘符根下，把前缀从
+      # D:\a\jdc-code-release\jdc-code-release 缩到 X:\ 再跑重建。
+      - name: 重建原生模块（Windows，短路径）
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $short = 'X:'
+          if (Test-Path "$short\") { subst $short /D }
+          subst $short "$env:GITHUB_WORKSPACE"
+          if (-not (Test-Path "$short\source\apps\desktop-client")) {
+            throw "subst 映射失败：$short\source\apps\desktop-client 不存在"
+          }
+          try {
+            Push-Location "$short\source\apps\desktop-client"
+            Write-Host "重建目录（经 subst 缩短）：$(Get-Location)"
+            pnpm rebuild:native
+            if ($LASTEXITCODE -ne 0) { throw "pnpm rebuild:native 失败，exit=$LASTEXITCODE" }
+          } finally {
+            Pop-Location
+            subst $short /D
+          }
 
       - name: 导入 Mac Developer ID 证书
         if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac'
