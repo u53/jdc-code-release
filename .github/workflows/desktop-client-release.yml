@@ -116,7 +116,7 @@ jobs:
         shell: pwsh
         run: |
           # 注意：LongPathsEnabled 对 MSBuild 的 WriteLinesToFile 无效（它走
-          # LegacyNormalizePath），所以原生模块重建另用 subst 缩短路径。
+          # LegacyNormalizePath），原生模块重建靠下面“源码移到短路径”解决。
           New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
             -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force | Out-Null
           git config --system core.longpaths true
@@ -130,6 +130,26 @@ jobs:
           ssh-key: ${{ secrets.JDC_SOURCE_REPO_SSH_KEY }}
           persist-credentials: false
           path: source
+
+      # windows-2025-vs2026 镜像 20261018 起，MSBuild 的 WriteLinesToFile 走
+      # LegacyNormalizePath，不认 LongPathsEnabled；node-pty 重建时
+      # node-addon-api 的 .tlog 路径约 260 字符，正好超限。subst 会被 Node 的
+      # realpath 还原成原路径，所以这里把源码真的搬到盘符根下的短目录，原位置留
+      # 一个 junction：后续步骤照常用 source/...，node-gyp 经 realpath 拿到的是
+      # 短路径（约 219 字符）。必须在 pnpm install 之前做，否则 node_modules 里的
+      # junction 会指向旧位置。
+      - name: 源码移到短路径（Windows）
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $short = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) '\s'
+          if (Test-Path $short) { Remove-Item $short -Recurse -Force }
+          Move-Item $source $short
+          New-Item -ItemType Junction -Path $source -Target $short | Out-Null
+          $resolved = node -p "require('fs').realpathSync(process.argv[1])" "$source\pnpm-lock.yaml"
+          Write-Host "source -> $resolved"
+          if (-not $resolved.StartsWith($short)) { throw "junction 未生效：$resolved" }
 
       - name: 安装 pnpm
         if: steps.filter.outputs.run == 'true'
@@ -156,33 +176,9 @@ jobs:
         run: pnpm build:deps
 
       - name: 重建原生模块
-        if: steps.filter.outputs.run == 'true' && matrix.platform != 'win'
+        if: steps.filter.outputs.run == 'true'
         working-directory: source/apps/desktop-client
         run: pnpm rebuild:native
-
-      # Windows 上 MSBuild 的 WriteLinesToFile 走 LegacyNormalizePath，不认
-      # LongPathsEnabled；node-pty 经 .pnpm 哈希目录后拼接的 .vcxproj 路径超过
-      # 260 字符。用 subst 把工作区挂到一个盘符根下，把前缀从
-      # D:\a\jdc-code-release\jdc-code-release 缩到 X:\ 再跑重建。
-      - name: 重建原生模块（Windows，短路径）
-        if: steps.filter.outputs.run == 'true' && matrix.platform == 'win'
-        shell: pwsh
-        run: |
-          $short = 'X:'
-          if (Test-Path "$short\") { subst $short /D }
-          subst $short "$env:GITHUB_WORKSPACE"
-          if (-not (Test-Path "$short\source\apps\desktop-client")) {
-            throw "subst 映射失败：$short\source\apps\desktop-client 不存在"
-          }
-          try {
-            Push-Location "$short\source\apps\desktop-client"
-            Write-Host "重建目录（经 subst 缩短）：$(Get-Location)"
-            pnpm rebuild:native
-            if ($LASTEXITCODE -ne 0) { throw "pnpm rebuild:native 失败，exit=$LASTEXITCODE" }
-          } finally {
-            Pop-Location
-            subst $short /D
-          }
 
       - name: 导入 Mac Developer ID 证书
         if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac'
