@@ -22,6 +22,11 @@ on:
           - all
           - mac
           - win
+      notarize:
+        description: macOS 安装包提交 Apple 公证（正式部署必须开启）
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: desktop-client-release-${{ inputs.source_ref }}
@@ -68,6 +73,10 @@ jobs:
             echo "::error::部署发布必须选择 platform=all；单平台仅生成 Artifact"
             exit 1
           fi
+          if [ "${{ inputs.deploy }}" = "true" ] && [ "${{ inputs.notarize }}" != "true" ]; then
+            echo "::error::部署发布必须开启 notarize；未公证的 macOS 包只用于排障"
+            exit 1
+          fi
           if [ -z "${RELEASE_API_URL:-}" ]; then
             echo "::error::缺少仓库变量 JDC_CLOUD_API_URL"
             exit 1
@@ -90,6 +99,8 @@ jobs:
     name: Build (${{ matrix.platform }})
     needs: [prepare]
     runs-on: ${{ matrix.os }}
+    # Apple 公证排队偶尔要几十分钟，notarytool --wait 自身没有超时
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -205,6 +216,27 @@ jobs:
           rm "$CERT_PATH"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
+      # 打包要二十多分钟，先用一次只读查询确认公证凭据可用，失败就别白等
+      - name: 预检 Apple 公证凭据
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac' && inputs.notarize
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "::error::缺少 APPLE_ID、APPLE_APP_SPECIFIC_PASSWORD 或 APPLE_TEAM_ID，无法公证"
+            exit 1
+          fi
+          if ! xcrun notarytool history --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --output-format json > /dev/null; then
+            echo "::error::Apple 公证凭据无效：检查 APPLE_ID 是否为该 Team 成员、专用密码是否已失效"
+            exit 1
+          fi
+          echo "Apple 公证凭据可用"
+
       - name: 打包 Electron
         if: steps.filter.outputs.run == 'true'
         working-directory: source/apps/desktop-client
@@ -215,6 +247,9 @@ jobs:
           VITE_JDC_WEBSITE_BASE_URL: https://jdccode.com
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'mac' && 'true' || 'false' }}
           APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+          # electron-builder 看到这三个变量就会在签名后公证并钉票据；关闭 notarize 时留空即跳过
+          APPLE_ID: ${{ matrix.platform == 'mac' && inputs.notarize && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && inputs.notarize && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           NODE_OPTIONS: --max-old-space-size=8192
         run: |
           node -e "if (process.env.VITE_JDC_EXTENSION_MARKETPLACE !== '1') throw new Error('正式构建必须启用 Marketplace')"
@@ -234,6 +269,31 @@ jobs:
           fi
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
           codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier='
+
+      - name: 校验 macOS 公证
+        if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac' && inputs.notarize
+        shell: bash
+        working-directory: source/apps/desktop-client
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(release/mac*/JDC\ Code.app release/mac*/JDCCode.app)
+          xcrun stapler validate "${apps[0]}"
+          assessment="$(spctl --assess --type execute -vvv "${apps[0]}" 2>&1)"
+          echo "$assessment"
+          if ! grep -q 'source=Notarized Developer ID' <<<"$assessment"; then
+            echo "::error::Gatekeeper 未识别为已公证应用"
+            exit 1
+          fi
+          # 自动更新用的 zip 必须装的是钉过票据的 .app
+          zips=(release/*-mac.zip)
+          for zip in "${zips[@]}"; do
+            check="$RUNNER_TEMP/notarize-zip-check"
+            rm -rf "$check" && mkdir -p "$check"
+            ditto -x -k "$zip" "$check"
+            unpacked=("$check"/*.app)
+            xcrun stapler validate "${unpacked[0]}"
+          done
 
       - name: 收集发布文件
         if: steps.filter.outputs.run == 'true'
