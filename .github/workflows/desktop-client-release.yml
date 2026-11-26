@@ -262,13 +262,25 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # 一次打出 Apple 芯片（release/mac-arm64）与 Intel（release/mac）两个 .app，逐个校验
           apps=(release/mac*/JDC\ Code.app release/mac*/JDCCode.app)
-          if [ "${#apps[@]}" -eq 0 ]; then
-            echo "::error::未找到已打包的 macOS .app"
+          if [ "${#apps[@]}" -ne 2 ]; then
+            echo "::error::应有 Apple 芯片与 Intel 两个 macOS .app，实际 ${#apps[@]} 个"
             exit 1
           fi
-          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
-          codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier='
+          seen=""
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier='
+            binary="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+            archs="$(lipo -archs "$binary")"
+            echo "$app: $archs"
+            seen="$seen $archs"
+          done
+          if ! grep -qw arm64 <<<"$seen" || ! grep -qw x86_64 <<<"$seen"; then
+            echo "::error::两个 .app 应分别是 arm64 与 x86_64，实际：$seen"
+            exit 1
+          fi
 
       - name: 校验 macOS 公证
         if: steps.filter.outputs.run == 'true' && matrix.platform == 'mac' && inputs.notarize
@@ -278,13 +290,15 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           apps=(release/mac*/JDC\ Code.app release/mac*/JDCCode.app)
-          xcrun stapler validate "${apps[0]}"
-          assessment="$(spctl --assess --type execute -vvv "${apps[0]}" 2>&1)"
-          echo "$assessment"
-          if ! grep -q 'source=Notarized Developer ID' <<<"$assessment"; then
-            echo "::error::Gatekeeper 未识别为已公证应用"
-            exit 1
-          fi
+          for app in "${apps[@]}"; do
+            xcrun stapler validate "$app"
+            assessment="$(spctl --assess --type execute -vvv "$app" 2>&1)"
+            echo "$assessment"
+            if ! grep -q 'source=Notarized Developer ID' <<<"$assessment"; then
+              echo "::error::Gatekeeper 未识别为已公证应用：$app"
+              exit 1
+            fi
+          done
           # 自动更新用的 zip 必须装的是钉过票据的 .app
           zips=(release/*-mac.zip)
           for zip in "${zips[@]}"; do
@@ -306,6 +320,19 @@ jobs:
           if [ "${{ matrix.platform }}" = "mac" ]; then
             installers=(release/*.dmg)
             files=(release/*.dmg release/*.dmg.blockmap release/*-mac.zip release/*-mac.zip.blockmap release/latest-mac.yml)
+            arm_dmg=(release/*-arm64.dmg)
+            intel_dmg=(release/*-x64.dmg)
+            zips=(release/*-mac.zip)
+            if [ "${#arm_dmg[@]}" -ne 1 ] || [ "${#intel_dmg[@]}" -ne 1 ] || [ "${#zips[@]}" -ne 2 ]; then
+              echo "::error::macOS 应各有一个 Apple 芯片与 Intel 的 dmg 和更新 zip：dmg arm64=${#arm_dmg[@]} x64=${#intel_dmg[@]}，zip=${#zips[@]}"
+              exit 1
+            fi
+            for zip in "${zips[@]}"; do
+              if ! grep -qF "$(basename "$zip")" release/latest-mac.yml; then
+                echo "::error::latest-mac.yml 没有列出 $(basename "$zip")，对应芯片的用户收不到自动更新"
+                exit 1
+              fi
+            done
           else
             installers=(release/*Setup*.exe)
             files=(release/*Setup*.exe release/*Setup*.exe.blockmap release/latest.yml)
